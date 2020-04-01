@@ -217,9 +217,12 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    # traindir = os.path.join(args.data, 'train') # stliu: comment this for CIFAR
+    # stliu: change the number for CIFAR
+    # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                  std=[0.229, 0.224, 0.225])
+    normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
+                                    std=[0.247, 0.243, 0.261])
     if args.aug_plus:
         # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
         augmentation = [
@@ -235,8 +238,17 @@ def main_worker(gpu, ngpus_per_node, args):
         ]
     else:
         # MoCo v1's aug: the same as InstDisc https://arxiv.org/abs/1805.01978
+        # augmentation = [
+        #     transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+        #     transforms.RandomGrayscale(p=0.2),
+        #     transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+        #     transforms.RandomHorizontalFlip(),
+        #     transforms.ToTensor(),
+        #     normalize
+        # ]
+        # stliu: CIFAR version
         augmentation = [
-            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+            transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
             transforms.RandomGrayscale(p=0.2),
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
             transforms.RandomHorizontalFlip(),
@@ -244,9 +256,15 @@ def main_worker(gpu, ngpus_per_node, args):
             normalize
         ]
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+    # train_dataset = datasets.ImageFolder(
+    #     traindir,
+    #     moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+
+    # stliu: change to CIFAR
+    train_dataset = datasets.CIFAR10(root=args.data, train=True, download=True, \
+        transform=moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+
+    # stliu: change the above Data loading code into CIFAR-10 version
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
