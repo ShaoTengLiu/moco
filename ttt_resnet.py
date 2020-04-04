@@ -79,7 +79,7 @@ class ResNetCifar(nn.Module):
             layers.append(BasicBlock(self.inplanes, planes, norm_layer))
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, layer=None):
         x = self.conv1(x)
         x = self.layer1(x)
         x = self.layer2(x)
@@ -88,5 +88,7 @@ class ResNetCifar(nn.Module):
         x = self.relu(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
+        if layer:
+            return x # stliu: to extract the feature
         x = self.fc(x)
         return x

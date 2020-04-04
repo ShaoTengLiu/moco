@@ -30,7 +30,8 @@ from ttt_resnet import ResNetCifar # stliu: to use tiny resnet from ttt
 from util import save_checkpoint, AverageMeter, ProgressMeter, adjust_learning_rate, accuracy # stliu: they were defined in this file
 import tensorboard_logger as tb_logger # stliu: to use tensorboard
 from tqdm import tqdm
-import my_liblinear_multicore.python.liblinearutil as liblinearutil
+import liblinear_multicore.python.liblinearutil as liblinearutil
+best_acc1 = 0
 
 model_names = sorted(name for name in models.__dict__
 	if name.islower() and not name.startswith("__")
@@ -112,13 +113,18 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--width', type=int, default=1, help='the width of ResNet(resnet_ttt)')
 	parser.add_argument('-s', '--save-freq', default=10, type=int,
 						metavar='N', help='save frequency (default: 10)')
+	parser.add_argument('--svm-freq', default=10, type=int,
+						metavar='N', help='SVM frequency (default: 10)')
 
 	# stliu: one can do something with parsers here
 	opt = parser.parse_args()
-	if not os.path.isdir(opt.model_path):
-		os.makedirs(opt.model_path)
-	if not os.path.isdir(opt.tb_path):
-		os.makedirs(opt.tb_path)
+	opt.model_name = 'moco_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}'.format(opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t)
+	opt.model_folder = os.path.join(opt.model_path, opt.model_name)
+	opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
+	if not os.path.isdir(opt.model_folder):
+		os.makedirs(opt.model_folder)
+	if not os.path.isdir(opt.tb_folder):
+		os.makedirs(opt.tb_folder)
 	
 	return opt
 
@@ -133,8 +139,20 @@ def get_train_loader(args):
 									std=[0.247, 0.243, 0.261])
 	if args.aug_plus:
 		# MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
+		# augmentation = [
+		# 	transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+		# 	transforms.RandomApply([
+		# 		transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
+		# 	], p=0.8),
+		# 	transforms.RandomGrayscale(p=0.2),
+		# 	transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.5),
+		# 	transforms.RandomHorizontalFlip(),
+		# 	transforms.ToTensor(),
+		# 	normalize
+		# ]
+		# stliu: CIFAR version
 		augmentation = [
-			transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
+			transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
 			transforms.RandomApply([
 				transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
 			], p=0.8),
@@ -182,7 +200,16 @@ def get_train_loader(args):
 	train_loader = torch.utils.data.DataLoader(
 		train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
 		num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-	return train_loader, train_sampler
+
+	# stliu: add two other loader for SVM
+	test_transform = transforms.Compose([transforms.ToTensor(), normalize])
+	memory_data = datasets.CIFAR10(root=args.data, train=True, download=True, transform=test_transform)
+	memory_loader = torch.utils.data.DataLoader(memory_data, batch_size=args.batch_size, 
+								shuffle=False, num_workers=args.workers, pin_memory=True)
+	test_data = datasets.CIFAR10(root=args.data, train=False, download=True, transform=test_transform)
+	test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, 
+								shuffle=False, num_workers=args.workers, pin_memory=True)
+	return train_loader, train_sampler, memory_loader, test_loader
 
 # stliu: the order of functions has been changed
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -191,20 +218,24 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 	losses = AverageMeter('Loss', ':.4e')
 	top1 = AverageMeter('Acc@1', ':6.2f')
 	top5 = AverageMeter('Acc@5', ':6.2f')
+	# progress = ProgressMeter(
+	# 	len(train_loader),
+	# 	[batch_time, data_time, losses, top1, top5],
+	# 	prefix="Epoch: [{}]".format(epoch))
+
+	# stliu: design new pregress
+	epoch_time = AverageMeter('Epoch Time', ':6.3f')
 	progress = ProgressMeter(
 		len(train_loader),
-		[batch_time, data_time, losses, top1, top5],
+		[epoch_time, losses, top1, top5],
 		prefix="Epoch: [{}]".format(epoch))
 
 	# switch to train mode
 	model.train()
 
 	end = time.time()
-	
-	# stliu: use bar to make conciser UI
-	train_bar = tqdm(enumerate(train_loader))
 
-	for i, (images, _) in train_bar: # stliu: use tqdm
+	for i, (images, _) in enumerate(train_loader):
 		# measure data loading time
 		data_time.update(time.time() - end)
 
@@ -230,41 +261,45 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
 		# measure elapsed time
 		batch_time.update(time.time() - end)
+		epoch_time.update(batch_time.avg*len(train_loader))
 		end = time.time()
 
-		if i % args.print_freq == 0:
+		if (i+1) % args.print_freq == 0: # stliu: change i to i+1
 			progress.display(i)
 	
 	return losses.avg
 
-def test(train_loader, model, val_loader, config_lsvm):
-    model.eval()
-    top1, feats_bank = AverageMeter('Acc@1', ':4.2f'), []
+# stliu: use SVM to test model
+def test(train_loader, model, val_loader, config_lsvm, args):
+	model.eval()
+	top1, feats_bank = AverageMeter('Acc@1', ':4.2f'), []
 
-    with torch.no_grad():
-        # generate feature bank
-        for (images, _) in train_loader:
-            _, feats= model(images.cuda(gpu, non_blocking=True))
-            feats_bank.append(feats)
-    feats_bank = torch.cat(feats_bank, dim=0)
-    label_bank = torch.tensor(train_loader.dataset.targets)
-    model_lsvm = liblinearutil.train(label_bank.cpu().numpy(), feats_bank.cpu().numpy(), config_lsvm)
+	with torch.no_grad():
+		# generate feature bank
+		for (images, _) in tqdm(train_loader, desc='Feature extracting'):
+			feats= model(images.cuda(args.gpu, non_blocking=True), 'r')
+			feats_bank.append(feats)
+	feats_bank = torch.cat(feats_bank, dim=0)
+	label_bank = torch.tensor(train_loader.dataset.targets)
+	model_lsvm = liblinearutil.train(label_bank.cpu().numpy(), feats_bank.cpu().numpy(), config_lsvm)
 
-    with torch.no_grad():
-        for i, (images, target) in enumerate(val_loader):
-            images = images.cuda(gpu, non_blocking=True)
-            # target = target.cuda(gpu, non_blocking=True)
+	with torch.no_grad():
+		val_bar = tqdm(val_loader)
+		for (images, target) in val_bar:
+			images = images.cuda(args.gpu, non_blocking=True)
 
-            # compute output
-            _, feats = model(images)
-            _, top1_acc, _ = liblinearutil.predict(target.cpu().numpy(), feats.cpu().numpy(), model_lsvm, '-q')
+			# compute output
+			feats = model(images, 'r')
+			_, top1_acc, _ = liblinearutil.predict(target.cpu().numpy(), feats.cpu().numpy(), model_lsvm, '-q')
 
-            # measure accuracy and record
-            top1.update(top1_acc[0], images.size(0))
-        
-    return top1.avg
+			# measure accuracy and record
+			top1.update(top1_acc[0], images.size(0))
+			val_bar.set_description('Acc@SVM:{:.2f}%'.format(top1.avg))
+		
+	return top1.avg
 
 def main_worker(gpu, ngpus_per_node, args):
+	global best_acc1 # stliu: best accuracy
 	args.gpu = gpu
 
 	# suppress printing if not master
@@ -292,6 +327,8 @@ def main_worker(gpu, ngpus_per_node, args):
 		model = moco.builder.MoCo(
 			ResNetCifar,
 			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width)
+		# stliu: SVM with model_val on single GPU
+		model_val = ResNetCifar(num_classes=args.moco_dim, width=args.width)
 	else:
 		model = moco.builder.MoCo(
 			models.__dict__[args.arch],
@@ -305,6 +342,7 @@ def main_worker(gpu, ngpus_per_node, args):
 		if args.gpu is not None:
 			torch.cuda.set_device(args.gpu)
 			model.cuda(args.gpu)
+			model_val.cuda(args.gpu) # stliu: for SVM
 			# When using a single GPU per process and per
 			# DistributedDataParallel, we need to divide the batch size
 			# ourselves based on the total number of GPUs we have
@@ -313,12 +351,14 @@ def main_worker(gpu, ngpus_per_node, args):
 			model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
 		else:
 			model.cuda()
+			model_val.cuda() # stliu: for SVM
 			# DistributedDataParallel will divide and allocate batch_size to all
 			# available GPUs if device_ids are not set
 			model = torch.nn.parallel.DistributedDataParallel(model)
 	elif args.gpu is not None:
 		torch.cuda.set_device(args.gpu)
 		model = model.cuda(args.gpu)
+		model_val = model_val.cuda(args.gpu) # stliu: for SVM
 		# comment out the following line for debugging
 		raise NotImplementedError("Only DistributedDataParallel is supported.")
 	else:
@@ -354,7 +394,7 @@ def main_worker(gpu, ngpus_per_node, args):
 	cudnn.benchmark = True
 
 	# stliu: I design it as a function
-	train_loader, train_sampler = get_train_loader(args)
+	train_loader, train_sampler, memory_loader, test_loader = get_train_loader(args)
 
 	# stliu: tensorboard
 	logger = tb_logger.Logger(logdir=args.tb_path, flush_secs=2)
@@ -366,19 +406,44 @@ def main_worker(gpu, ngpus_per_node, args):
 
 		# train for one epoch
 		loss = train(train_loader, model, criterion, optimizer, epoch, args)
-		
+
 		# stliu: tensorboard logger
 		logger.log_value('loss', loss, epoch)
 
 		if not args.multiprocessing_distributed or (args.multiprocessing_distributed
 				and args.rank % ngpus_per_node == 0):
-			if epoch % args.save_freq == 0:
+			if epoch % args.save_freq == 0 and epoch != 0: # stliu: ignore the first model
+				print('==> Saving...')
 				save_checkpoint({
 					'epoch': epoch + 1,
 					'arch': args.arch,
 					'state_dict': model.state_dict(),
 					'optimizer' : optimizer.state_dict(),
-				}, is_best=False, filename=args.model_path + '/checkpoint_{:04d}.pth.tar'.format(epoch))
+				}, is_best=False, filename=args.model_folder + '/checkpoint_{:04d}.pth.tar'.format(epoch))
+		# stliu: test with SVM
+		if (epoch+1) % args.svm_freq == 0:
+			state_dict = model.state_dict()
+			for k in list(state_dict.keys()):
+				if k.startswith('module.encoder_q') and not k.startswith('module.encoder_q.fc'):
+					state_dict[k[len("module.encoder_q."):]] = state_dict[k]
+				del state_dict[k]
+			model_val.load_state_dict(state_dict, strict=False)
+			flag_liblinear = '-s 2 -q -n '+str(args.workers)
+			test_acc_svm = test(memory_loader, model_val, test_loader, flag_liblinear, args)
+			
+			# stliu: save the best model
+			is_best = test_acc_svm > best_acc1
+			best_acc1 = max(test_acc_svm, best_acc1)
+			if is_best:
+				print('==> Saving the Best...')
+				save_checkpoint({
+					'epoch': epoch + 1,
+					'arch': args.arch,
+					'state_dict': model.state_dict(),
+					'optimizer' : optimizer.state_dict(),
+				}, is_best=True, filename=args.model_folder + '/best.pth.tar'.format(epoch))
+	print('The Best SVM Accuracy:', best_acc1)
+
 
 def main():
 	args = parse_option()# stliu: use a function
