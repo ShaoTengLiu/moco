@@ -31,6 +31,7 @@ from util import save_checkpoint, AverageMeter, ProgressMeter, adjust_learning_r
 import tensorboard_logger as tb_logger # stliu: to use tensorboard
 from tqdm import tqdm
 import liblinear_multicore.python.liblinearutil as liblinearutil
+import numpy as np
 best_acc1 = 0
 
 model_names = sorted(name for name in models.__dict__
@@ -116,6 +117,7 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--svm-freq', default=10, type=int,
 						metavar='N', help='SVM frequency (default: 10)')
 	parser.add_argument('--group_norm', default=0, type=int)
+	parser.add_argument('--val', default=None)
 
 	# stliu: one can do something with parsers here
 	opt = parser.parse_args()
@@ -211,6 +213,10 @@ def get_train_loader(args):
 	memory_loader = torch.utils.data.DataLoader(memory_data, batch_size=args.batch_size, 
 								shuffle=False, num_workers=args.workers, pin_memory=True)
 	test_data = datasets.CIFAR10(root=args.data, train=False, download=True, transform=test_transform)
+	if args.val and args.val != 'original':
+		corruption, level = args.val.split(',')
+		teset_raw = np.load(args.data + '/CIFAR-10-C-trainval/val/%s.npy' %(corruption))[(int(level)-1)*10000: int(level)*10000]
+		test_data.data = teset_raw
 	test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, 
 								shuffle=False, num_workers=args.workers, pin_memory=True)
 	return train_loader, train_sampler, memory_loader, test_loader
@@ -405,54 +411,65 @@ def main_worker(gpu, ngpus_per_node, args):
 
 	# stliu: I design it as a function
 	train_loader, train_sampler, memory_loader, test_loader = get_train_loader(args)
+	
+	if args.val:
+		state_dict = model.state_dict()
+		for k in list(state_dict.keys()):
+			if k.startswith('module.encoder_q') and not k.startswith('module.encoder_q.fc'):
+				state_dict[k[len("module.encoder_q."):]] = state_dict[k]
+			del state_dict[k]
+		model_val.load_state_dict(state_dict, strict=False)
+		flag_liblinear = '-s 2 -q -n '+str(args.workers)
+		test_acc_svm = test(memory_loader, model_val, test_loader, flag_liblinear, args)
+		print('#### result ####\n' + args.val + ':', test_acc_svm, '\n################')
+	else:
+		# stliu: tensorboard
+		logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
 
-	# stliu: tensorboard
-	logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
+		for epoch in range(args.start_epoch, args.epochs):
+			if args.distributed:
+				train_sampler.set_epoch(epoch)
+			adjust_learning_rate(optimizer, epoch, args)
 
-	for epoch in range(args.start_epoch, args.epochs):
-		if args.distributed:
-			train_sampler.set_epoch(epoch)
-		adjust_learning_rate(optimizer, epoch, args)
+			# train for one epoch
+			loss = train(train_loader, model, criterion, optimizer, epoch, args)
 
-		# train for one epoch
-		loss = train(train_loader, model, criterion, optimizer, epoch, args)
+			# stliu: tensorboard logger
+			logger.log_value('loss', loss, epoch)
 
-		# stliu: tensorboard logger
-		logger.log_value('loss', loss, epoch)
-
-		if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-				and args.rank % ngpus_per_node == 0):
-			if epoch % args.save_freq == 0 and epoch != 0: # stliu: ignore the first model
-				print('==> Saving...')
-				save_checkpoint({
-					'epoch': epoch + 1,
-					'arch': args.arch,
-					'state_dict': model.state_dict(),
-					'optimizer' : optimizer.state_dict(),
-				}, is_best=False, filename=args.model_folder + '/checkpoint_{:04d}.pth.tar'.format(epoch))
-		# stliu: test with SVM
-		if (epoch+1) % args.svm_freq == 0:
-			state_dict = model.state_dict()
-			for k in list(state_dict.keys()):
-				if k.startswith('module.encoder_q') and not k.startswith('module.encoder_q.fc'):
-					state_dict[k[len("module.encoder_q."):]] = state_dict[k]
-				del state_dict[k]
-			model_val.load_state_dict(state_dict, strict=False)
-			flag_liblinear = '-s 2 -q -n '+str(args.workers)
-			test_acc_svm = test(memory_loader, model_val, test_loader, flag_liblinear, args)
-			
-			# stliu: save the best model
-			is_best = test_acc_svm > best_acc1
-			best_acc1 = max(test_acc_svm, best_acc1)
-			if is_best:
-				print('==> Saving the Best...')
-				save_checkpoint({
-					'epoch': epoch + 1,
-					'arch': args.arch,
-					'state_dict': model.state_dict(),
-					'optimizer' : optimizer.state_dict(),
-				}, is_best=True, filename=args.model_folder + '/best.pth.tar'.format(epoch))
-	print('The Best SVM Accuracy:', best_acc1)
+			if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+					and args.rank % ngpus_per_node == 0):
+				if epoch % args.save_freq == 0 and epoch != 0: # stliu: ignore the first model
+					print('==> Saving...')
+					save_checkpoint({
+						'epoch': epoch + 1,
+						'arch': args.arch,
+						'state_dict': model.state_dict(),
+						'optimizer' : optimizer.state_dict(),
+					}, is_best=False, filename=args.model_folder + '/checkpoint_{:04d}.pth.tar'.format(epoch))
+			# stliu: test with SVM
+			if (epoch+1) % args.svm_freq == 0:
+				state_dict = model.state_dict()
+				for k in list(state_dict.keys()):
+					if k.startswith('module.encoder_q') and not k.startswith('module.encoder_q.fc'):
+						state_dict[k[len("module.encoder_q."):]] = state_dict[k]
+					del state_dict[k]
+				model_val.load_state_dict(state_dict, strict=False)
+				flag_liblinear = '-s 2 -q -n '+str(args.workers)
+				test_acc_svm = test(memory_loader, model_val, test_loader, flag_liblinear, args)
+				
+				# stliu: save the best model
+				is_best = test_acc_svm > best_acc1
+				best_acc1 = max(test_acc_svm, best_acc1)
+				if is_best:
+					print('==> Saving the Best...')
+					save_checkpoint({
+						'epoch': epoch + 1,
+						'arch': args.arch,
+						'state_dict': model.state_dict(),
+						'optimizer' : optimizer.state_dict(),
+					}, is_best=True, filename=args.model_folder + '/best.pth.tar'.format(epoch))
+		print('The Best SVM Accuracy:', best_acc1)
 
 
 def main():

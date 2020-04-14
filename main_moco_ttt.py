@@ -37,6 +37,8 @@ from ttt_utils.prepare_dataset import *
 from ttt_utils.rotation import rotate_batch
 from PIL import Image
 from transforms import *
+from detectron2_utils.batch_norm import FrozenBatchNorm2d
+
 
 best_acc1 = 0
 
@@ -130,11 +132,15 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--val', default=None)
 	parser.add_argument('--ttt', action='store_true')
 	parser.add_argument('--aug', default='original')
+	parser.add_argument('--aug_ttt', default='original')
+	parser.add_argument('--bn_frozen', action='store_true')
 
 
 	# stliu: one can do something with parsers here
 	opt = parser.parse_args()
-	if opt.group_norm == 0:
+	if opt.bn_frozen:
+		opt.model_name = 'moco_ttt_bnf_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
+	elif opt.group_norm == 0:
 		opt.model_name = 'moco_ttt_bn_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
 	else:
 		opt.model_name = 'moco_ttt_gn{}_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.group_norm, opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
@@ -150,13 +156,6 @@ def parse_option(): # design a function for parse
 # stliu: create a function for dataloader
 def get_loader(args):
 	# Data loading code
-	# traindir = os.path.join(args.data, 'train') # stliu: comment this for CIFAR
-	# stliu: change the number for CIFAR
-	# normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-	#                                  std=[0.229, 0.224, 0.225])
-	normalize = transforms.Normalize(mean=[0.4914, 0.4822, 0.4465],
-									std=[0.247, 0.243, 0.261])
-
 	# stliu: change to CIFAR
 	train_dataset = datasets.CIFAR10(root=args.data, train=True, download=True, \
 		transform=moco.loader.TwoCropsTransform(transforms.Compose(aug(args.aug))))
@@ -205,8 +204,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args, ssh):
 		prefix="Epoch: [{}]".format(epoch))
 
 	# switch to train mode
-	model.train()
-	ssh.train()
+	if not args.bn_frozen:
+		model.train()
+		ssh.train()
 
 	end = time.time()
 
@@ -282,7 +282,7 @@ def test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh):
 
 # stliu: use SVM to test model
 def ttt_test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh, teset, head):
-	tr_transform = transforms.Compose(aug(args.aug))
+	tr_transform = transforms.Compose(aug(args.aug_ttt))
 	# stliu: load ckpt first
 	if os.path.isfile(args.resume):
 		print("=> loading checkpoint '{}'".format(args.resume))
@@ -378,10 +378,12 @@ def main_worker(gpu, ngpus_per_node, args):
 	if args.arch == 'resnet_ttt':
 		model = moco.builder.MoCo(
 			ResNetCifar,
-			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width, gn=args.group_norm)
+			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width, gn=args.group_norm, bnf=args.bn_frozen)
 		_, ext, head, ssh = build_model(args, model.encoder_q) # stliu: ext, head and ssh share same paras as encoder_q
 		# stliu: SVM with model_val on single GPU
-		if args.group_norm == 0:
+		if args.bn_frozen:
+			norm_layer = FrozenBatchNorm2d
+		elif args.group_norm == 0:
 			norm_layer = nn.BatchNorm2d
 		else:
 			def gn_helper(planes):

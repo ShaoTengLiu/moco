@@ -1,6 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import torch
 import torch.nn as nn
+from detectron2_utils.batch_norm import FrozenBatchNorm2d
 
 
 class MoCo(nn.Module):
@@ -8,7 +9,7 @@ class MoCo(nn.Module):
 	Build a MoCo model with: a query encoder, a key encoder, and a queue
 	https://arxiv.org/abs/1911.05722
 	"""
-	def __init__(self, base_encoder, dim=128, K=65536, m=0.999, T=0.07, mlp=False, width=-1, gn=0):
+	def __init__(self, base_encoder, dim=128, K=65536, m=0.999, T=0.07, mlp=False, width=-1, gn=0, bnf=False):
 		"""
 		dim: feature dimension (default: 128)
 		K: queue size; number of negative keys (default: 65536)
@@ -24,7 +25,9 @@ class MoCo(nn.Module):
 		# create the encoders
 		# num_classes is the output fc dimension
 		if width != -1: # stliu: which means this is a resnet_ttt
-			if gn == 0:
+			if bnf:
+				norm_layer = FrozenBatchNorm2d
+			elif gn == 0:
 				norm_layer = nn.BatchNorm2d
 			else:
 				def gn_helper(planes):

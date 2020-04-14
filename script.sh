@@ -2,8 +2,8 @@ python main_moco_ttt.py \
   -a resnet_ttt \
   --print-freq 20 \
   --save-freq 40 \
-  --svm-freq 40 \
-  --dist-url 'tcp://localhost:10001' --multiprocessing-distributed --world-size 1 --rank 0 \
+  --svm-freq 20 \
+  --dist-url 'tcp://localhost:10011' --multiprocessing-distributed --world-size 1 --rank 0 \
   --model_path ./results/model \
   --tb_path ./results/tb \
   --mlp --aug-plus --cos \
@@ -14,8 +14,11 @@ python main_moco_ttt.py \
   --moco-k 4096 \
   --moco-t 0.2 \
   ../data/myCIFAR-10-C/ \
-  --group_norm 8 \
+  --bn_frozen \
   --shared layer2 \
   --rotation_type expand \
-  --aug gaussian_noise \
-  --resume ./results/model/moco_ttt_gn8_w4_resnet_ttt_lr_0.03_bsz_256_k_4096_t_0.2/checkpoint_0240.pth.tar
+  --aug gaussian_noise
+  # --aug_ttt original \
+  # --val original \
+  # --ttt \
+  # --resume ./results/model/moco_ttt_gn8_w4_resnet_ttt_lr_0.03_bsz_256_k_4096_t_0.2_gaussian_noise/checkpoint_0240.pth.tar
