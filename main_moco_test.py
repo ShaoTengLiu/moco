@@ -39,6 +39,7 @@ from PIL import Image
 from transforms import *
 from util import get_norm
 import datetime
+from detectron2_utils.batch_norm import FrozenBatchNorm2d
 
 best_acc1 = 0
 
@@ -225,6 +226,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args, ssh):
 		if args.shared is not None:
 			inputs_ssh, labels_ssh = rotate_batch(images[0], args.rotation_type)
 			inputs_ssh, labels_ssh = inputs_ssh.cuda(args.gpu, non_blocking=True), labels_ssh.cuda(args.gpu, non_blocking=True)
+			model = FrozenBatchNorm2d.convert_frozen_batchnorm(model)
+			ssh = FrozenBatchNorm2d.convert_frozen_batchnorm(ssh)
 			outputs_ssh = ssh(inputs_ssh)
 			loss_ssh = criterion(outputs_ssh, labels_ssh)
 			loss += loss_ssh
@@ -406,27 +409,27 @@ def main_worker(gpu, ngpus_per_node, args):
 			# ourselves based on the total number of GPUs we have
 			args.batch_size = int(args.batch_size / ngpus_per_node)
 			args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-			model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False)
-			ssh = torch.nn.parallel.DistributedDataParallel(ssh, broadcast_buffers=False)
-			# model = torch.nn.parallel.DistributedDataParallel(model)
-			# ssh = torch.nn.parallel.DistributedDataParallel(ssh)
+			# model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], broadcast_buffers=False)
+			# ssh = torch.nn.parallel.DistributedDataParallel(ssh, device_ids=[args.gpu], broadcast_buffers=False)
+			model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+			ssh = torch.nn.parallel.DistributedDataParallel(ssh, device_ids=[args.gpu])
 		else:
 			model.cuda()
 			model_val.cuda() # stliu: for SVM
 			ssh = ssh.cuda()
 			# DistributedDataParallel will divide and allocate batch_size to all
 			# available GPUs if device_ids are not set
-			model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False)
-			ssh = torch.nn.parallel.DistributedDataParallel(ssh, broadcast_buffers=False)
-			# model = torch.nn.parallel.DistributedDataParallel(model)
-			# ssh = torch.nn.parallel.DistributedDataParallel(ssh)
+			# model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False)
+			# ssh = torch.nn.parallel.DistributedDataParallel(ssh, broadcast_buffers=False)
+			model = torch.nn.parallel.DistributedDataParallel(model)
+			ssh = torch.nn.parallel.DistributedDataParallel(ssh)
 	elif args.gpu is not None:
 		torch.cuda.set_device(args.gpu)
 		model = model.cuda(args.gpu)
 		model_val = model_val.cuda(args.gpu) # stliu: for SVM
 		ssh = ssh.cuda(args.gpu)
 		# comment out the following line for debugging
-		raise NotImplementedError("Only DistributedDataParallel is supported.")
+		# raise NotImplementedError("Only DistributedDataParallel is supported.")
 	else:
 		# AllGather implementation (batch shuffle, queue update, etc.) in
 		# this code only supports DistributedDataParallel.

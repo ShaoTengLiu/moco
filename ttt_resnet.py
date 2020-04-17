@@ -53,8 +53,10 @@ class ResNetCifar(nn.Module):
         super(ResNetCifar, self).__init__()
 
         # Following the Wide ResNet convention, we fix the very first convolution
-        self.conv1 = nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
-        self.inplanes = 16
+        # self.conv1 = nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        # self.inplanes = 16
+        self.conv1 = nn.Conv2d(channels, 16*width, kernel_size=3, stride=1, padding=1, bias=False)
+        self.inplanes = 16*width
         self.layer1 = self._make_layer(norm_layer, 16 * width)
         self.layer2 = self._make_layer(norm_layer, 32 * width, stride=2)
         self.layer3 = self._make_layer(norm_layer, 64 * width, stride=2)

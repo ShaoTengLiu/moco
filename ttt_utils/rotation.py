@@ -28,11 +28,12 @@ def rotate_batch(batch, label):
 	if label == 'rand':
 		labels = torch.randint(4, (len(batch),), dtype=torch.long)
 	elif label == 'expand':
-		labels = torch.cat([torch.zeros(len(batch), dtype=torch.long),
-					torch.zeros(len(batch), dtype=torch.long) + 1,
-					torch.zeros(len(batch), dtype=torch.long) + 2,
-					torch.zeros(len(batch), dtype=torch.long) + 3])
-		batch = batch.repeat((4,1,1,1))
+		# labels = torch.cat([torch.zeros(len(batch), dtype=torch.long),
+		# 			torch.zeros(len(batch), dtype=torch.long) + 1,
+		# 			torch.zeros(len(batch), dtype=torch.long) + 2,
+		# 			torch.zeros(len(batch), dtype=torch.long) + 3])
+		labels = torch.cat([torch.zeros(len(batch), dtype=torch.long)])
+		batch = batch.repeat((1,1,1,1))
 	else:
 		assert isinstance(label, int)
 		labels = torch.zeros((len(batch),), dtype=torch.long) + label

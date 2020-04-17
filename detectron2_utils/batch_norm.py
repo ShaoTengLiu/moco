@@ -50,7 +50,6 @@ class FrozenBatchNorm2d(nn.Module):
         else:
             # When gradients are not needed, F.batch_norm is a single fused op
             # and provide more optimization opportunities.
-            print('here')
             return F.batch_norm(
                 x,
                 self.running_mean,

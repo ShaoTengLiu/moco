@@ -35,6 +35,15 @@ def aug(aug_type, level=5):
             transforms.ToTensor(),
             normalize
         ]
+    elif aug_type == 'v1':
+        augmentation = [
+            transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize
+        ]
     elif aug_type == 'ttt':
         augmentation = [
             transforms.RandomCrop(32, padding=4),

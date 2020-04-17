@@ -1,8 +1,9 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import torch
 import torch.nn as nn
-from detectron2_utils.batch_norm import FrozenBatchNorm2d
 
+# stliu: new import
+from util import get_norm
 
 class MoCo(nn.Module):
 	"""
@@ -25,14 +26,7 @@ class MoCo(nn.Module):
 		# create the encoders
 		# num_classes is the output fc dimension
 		if width != -1: # stliu: which means this is a resnet_ttt
-			if bnf:
-				norm_layer = FrozenBatchNorm2d
-			elif gn == 0:
-				norm_layer = nn.BatchNorm2d
-			else:
-				def gn_helper(planes):
-					return nn.GroupNorm(gn, planes)
-				norm_layer = gn_helper
+			norm_layer = get_norm(gn, bnf)
 			self.encoder_q = base_encoder(num_classes=dim, width=width, norm_layer=norm_layer)
 			self.encoder_k = base_encoder(num_classes=dim, width=width, norm_layer=norm_layer)
 		else:
