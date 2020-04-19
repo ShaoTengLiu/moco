@@ -134,7 +134,6 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--aug', default='original')
 	parser.add_argument('--norm', default='bn')
 	parser.add_argument('--frozen', action='store_true') # freeze the norm(bn) when ttt
-	parser.add_argument('--bn_only', action='store_true') # only update bn at test time
 
 
 	# stliu: one can do something with parsers here
@@ -311,10 +310,7 @@ def ttt_test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh, 
 		model_kq = FrozenBatchNorm2d.convert_frozen_batchnorm(model_kq)
 	top1 = AverageMeter('Acc@1', ':4.2f')
 	criterion_ssh = nn.CrossEntropyLoss().cuda()
-	if args.bn_only:
-		optimizer_ssh = torch.optim.SGD(ssh.parameters(), lr=0)
-	else:
-		optimizer_ssh = torch.optim.SGD(ssh.parameters(), lr=args.lr)
+	optimizer_ssh = torch.optim.SGD(ssh.parameters(), lr=args.lr)
 	ttt_bar = tqdm(range(1, len(teset)+1))
 	test_transform = transforms.Compose([transforms.ToTensor(), normalize])
 	for i in ttt_bar:
@@ -326,24 +322,27 @@ def ttt_test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh, 
 		head.load_state_dict(checkpoint['head'])
 		_, label = teset[i-1] # stliu: get the label for the image
 		image = Image.fromarray(teset.data[i-1])
-		ssh.train()
-		inputs = [tr_transform(image) for _ in range(args.batch_size)]
-		inputs = torch.stack(inputs)
-		inputs_ssh, labels_ssh = rotate_batch(inputs, 'rand')
-		inputs_ssh, labels_ssh = inputs_ssh.cuda(), labels_ssh.cuda()
-		optimizer_ssh.zero_grad()
-		outputs_ssh = ssh(inputs_ssh)
-		loss_ssh = criterion_ssh(outputs_ssh, labels_ssh)
-		loss_ssh.backward()
-		optimizer_ssh.step()
-
-		# test again
 		state_dict = model_kq.state_dict()
 		for k in list(state_dict.keys()):
 			if k.startswith('module.encoder_q') and not k.startswith('module.encoder_q.fc'):
 				state_dict[k[len("module.encoder_q."):]] = state_dict[k]
 			del state_dict[k]
 		model.load_state_dict(state_dict, strict=False)
+		model.train()
+		ssh.train()
+		inputs = [tr_transform(image) for _ in range(args.batch_size)]
+		inputs = torch.stack(inputs)
+		# inputs_ssh, labels_ssh = rotate_batch(inputs, 'rand')
+		# inputs_ssh, labels_ssh = inputs_ssh.cuda(), labels_ssh.cuda()
+		# optimizer_ssh.zero_grad()
+		# outputs_ssh = ssh(inputs_ssh)
+		# loss_ssh = criterion_ssh(outputs_ssh, labels_ssh)
+		# loss_ssh.backward()
+		# optimizer_ssh.step()
+		inputs = inputs.cuda(args.gpu, non_blocking=True)
+		feats = model(inputs, 'r')
+		# test again
+
 		model.eval()
 		ssh.eval()
 

@@ -5,7 +5,7 @@ import torch
 import shutil
 
 import torch.nn as nn
-from detectron2_utils.batch_norm import FrozenBatchNorm2d
+from detectron2_utils.batch_norm import FrozenBatchNorm2d, NaiveSyncBatchNorm
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 	torch.save(state, filename)
@@ -82,13 +82,28 @@ def accuracy(output, target, topk=(1,)):
 			res.append(correct_k.mul_(100.0 / batch_size))
 		return res
 
-def get_norm(gn, bnf):
-	if bnf:
-		norm_layer = FrozenBatchNorm2d
-	elif gn == 0:
+import torch.nn.functional as F
+# stliu: can be used easily in DDP
+class my_BatchNorm2d(nn.BatchNorm2d):
+	def frozen(self):
+		self.track_running_stats=False
+
+def get_norm(norm):
+	if norm == 'bn':
 		norm_layer = nn.BatchNorm2d
+	elif norm == 'bnf':
+		norm_layer = FrozenBatchNorm2d
+	elif norm == 'sync':
+		norm_layer = nn.SyncBatchNorm
+	elif norm == 'nsync':
+		norm_layer = NaiveSyncBatchNorm
 	else:
+		group_norm = int(norm.split(',')[1])
 		def gn_helper(planes):
-			return nn.GroupNorm(gn, planes)
+			return nn.GroupNorm(group_norm, planes)
 		norm_layer = gn_helper
 	return norm_layer
+
+def set_bn_eval(m):
+    if isinstance(m, my_BatchNorm2d):
+        m.frozen()

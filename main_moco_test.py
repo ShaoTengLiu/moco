@@ -125,7 +125,6 @@ def parse_option(): # design a function for parse
 						metavar='N', help='save frequency (default: 10)')
 	parser.add_argument('--svm-freq', default=10, type=int,
 						metavar='N', help='SVM frequency (default: 10)')
-	parser.add_argument('--group_norm', default=0, type=int)
 	parser.add_argument('--dataset', default='cifar10')
 	parser.add_argument('--depth', type=int, default=26, help='the depth of ResNet(resnet_ttt)')
 	parser.add_argument('--shared', default=None)
@@ -133,17 +132,13 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--val', default=None)
 	parser.add_argument('--ttt', action='store_true')
 	parser.add_argument('--aug', default='original')
-	parser.add_argument('--bn_frozen', action='store_true')
+	parser.add_argument('--norm', default='bn')
+	parser.add_argument('--frozen', action='store_true') # freeze the norm(bn) when ttt
 
 
 	# stliu: one can do something with parsers here
 	opt = parser.parse_args()
-	if opt.bn_frozen:
-		opt.model_name = 'moco_ttt_bnf_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
-	elif opt.group_norm == 0:
-		opt.model_name = 'moco_ttt_bn_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
-	else:
-		opt.model_name = 'moco_ttt_gn{}_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.group_norm, opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
+	opt.model_name = 'moco_ttt_{}_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.norm, opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
 	opt.model_folder = os.path.join(opt.model_path, opt.model_name)
 	opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
 	if not os.path.isdir(opt.model_folder):
@@ -207,7 +202,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, ssh):
 		prefix="Epoch: [{}]".format(epoch))
 
 	# switch to train mode
-	if not args.bn_frozen:
+	if args.norm != 'bnf':
 		model.train()
 		ssh.train()
 
@@ -226,8 +221,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args, ssh):
 		if args.shared is not None:
 			inputs_ssh, labels_ssh = rotate_batch(images[0], args.rotation_type)
 			inputs_ssh, labels_ssh = inputs_ssh.cuda(args.gpu, non_blocking=True), labels_ssh.cuda(args.gpu, non_blocking=True)
-			model = FrozenBatchNorm2d.convert_frozen_batchnorm(model)
-			ssh = FrozenBatchNorm2d.convert_frozen_batchnorm(ssh)
 			outputs_ssh = ssh(inputs_ssh)
 			loss_ssh = criterion(outputs_ssh, labels_ssh)
 			loss += loss_ssh
@@ -313,13 +306,19 @@ def ttt_test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh, 
 	model_lsvm = liblinearutil.train(label_bank.cpu().numpy(), feats_bank.cpu().numpy(), config_lsvm)
 	
 	# stliu: test time training
+	if args.frozen:
+		model_kq = FrozenBatchNorm2d.convert_frozen_batchnorm(model_kq)
 	top1 = AverageMeter('Acc@1', ':4.2f')
 	criterion_ssh = nn.CrossEntropyLoss().cuda()
 	optimizer_ssh = torch.optim.SGD(ssh.parameters(), lr=args.lr)
 	ttt_bar = tqdm(range(1, len(teset)+1))
 	test_transform = transforms.Compose([transforms.ToTensor(), normalize])
 	for i in ttt_bar:
-		model_kq.load_state_dict(checkpoint['state_dict'])
+		pretrained_dict = checkpoint['state_dict']
+		model_dict = model_kq.state_dict()
+		pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+		model_dict.update(pretrained_dict)
+		model_kq.load_state_dict(pretrained_dict)
 		head.load_state_dict(checkpoint['head'])
 		_, label = teset[i-1] # stliu: get the label for the image
 		image = Image.fromarray(teset.data[i-1])
@@ -384,10 +383,10 @@ def main_worker(gpu, ngpus_per_node, args):
 	if args.arch == 'resnet_ttt':
 		model = moco.builder.MoCo(
 			ResNetCifar,
-			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width, gn=args.group_norm, bnf=args.bn_frozen)
+			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width, norm=args.norm)
 		_, ext, head, ssh = build_model(args, model.encoder_q) # stliu: ext, head and ssh share same paras as encoder_q
 		# stliu: SVM with model_val on single GPU
-		norm_layer = get_norm(args.group_norm, args.bn_frozen)
+		norm_layer = get_norm(args.norm)
 		model_val = ResNetCifar(num_classes=args.moco_dim, width=args.width, norm_layer=norm_layer)
 	else:
 		model = moco.builder.MoCo(
@@ -409,27 +408,28 @@ def main_worker(gpu, ngpus_per_node, args):
 			# ourselves based on the total number of GPUs we have
 			args.batch_size = int(args.batch_size / ngpus_per_node)
 			args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-			# model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], broadcast_buffers=False)
-			# ssh = torch.nn.parallel.DistributedDataParallel(ssh, device_ids=[args.gpu], broadcast_buffers=False)
-			model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-			ssh = torch.nn.parallel.DistributedDataParallel(ssh, device_ids=[args.gpu])
+			# stliu: add broadcast_buffers=False to use normal BN
+			model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], broadcast_buffers=False, find_unused_parameters=True)
+			ssh = torch.nn.parallel.DistributedDataParallel(ssh, device_ids=[args.gpu], broadcast_buffers=False, find_unused_parameters=True)
+			# model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+			# ssh = torch.nn.parallel.DistributedDataParallel(ssh, device_ids=[args.gpu])
 		else:
 			model.cuda()
 			model_val.cuda() # stliu: for SVM
 			ssh = ssh.cuda()
 			# DistributedDataParallel will divide and allocate batch_size to all
 			# available GPUs if device_ids are not set
-			# model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False)
-			# ssh = torch.nn.parallel.DistributedDataParallel(ssh, broadcast_buffers=False)
-			model = torch.nn.parallel.DistributedDataParallel(model)
-			ssh = torch.nn.parallel.DistributedDataParallel(ssh)
+			model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False, find_unused_parameters=True)
+			ssh = torch.nn.parallel.DistributedDataParallel(ssh, broadcast_buffers=False, find_unused_parameters=True)
+			# model = torch.nn.parallel.DistributedDataParallel(model)
+			# ssh = torch.nn.parallel.DistributedDataParallel(ssh)
 	elif args.gpu is not None:
 		torch.cuda.set_device(args.gpu)
 		model = model.cuda(args.gpu)
 		model_val = model_val.cuda(args.gpu) # stliu: for SVM
 		ssh = ssh.cuda(args.gpu)
 		# comment out the following line for debugging
-		# raise NotImplementedError("Only DistributedDataParallel is supported.")
+		raise NotImplementedError("Only DistributedDataParallel is supported.")
 	else:
 		# AllGather implementation (batch shuffle, queue update, etc.) in
 		# this code only supports DistributedDataParallel.
