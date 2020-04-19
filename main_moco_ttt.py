@@ -135,6 +135,7 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--norm', default='bn')
 	parser.add_argument('--frozen', action='store_true') # freeze the norm(bn) when ttt
 	parser.add_argument('--bn_only', action='store_true') # only update bn at test time
+	parser.add_argument('--bn_update', action='store_true') # using whole val_loader to update BN
 
 
 	# stliu: one can do something with parsers here
@@ -262,6 +263,16 @@ def test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh):
 	feats_bank = torch.cat(feats_bank, dim=0)
 	label_bank = torch.tensor(train_loader.dataset.targets)
 	model_lsvm = liblinearutil.train(label_bank.cpu().numpy(), feats_bank.cpu().numpy(), config_lsvm)
+
+	if args.bn_update:
+		# stliu: ttt
+		model.train()
+		val_bar = tqdm(val_loader)
+		for (images, _) in val_bar:
+			images = images.cuda(args.gpu, non_blocking=True)
+			# update BN
+			feats = model(images, 'r')
+			val_bar.set_description('Update BN')
 
 	with torch.no_grad():
 		val_bar = tqdm(val_loader)
