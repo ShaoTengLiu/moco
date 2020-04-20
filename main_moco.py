@@ -118,6 +118,7 @@ def parse_option(): # design a function for parse
 						metavar='N', help='SVM frequency (default: 10)')
 	parser.add_argument('--group_norm', default=0, type=int)
 	parser.add_argument('--val', default=None)
+	parser.add_argument('--bn_update', action='store_true')
 
 	# stliu: one can do something with parsers here
 	opt = parser.parse_args()
@@ -293,6 +294,15 @@ def test(train_loader, model, val_loader, config_lsvm, args):
 	label_bank = torch.tensor(train_loader.dataset.targets)
 	model_lsvm = liblinearutil.train(label_bank.cpu().numpy(), feats_bank.cpu().numpy(), config_lsvm)
 
+	# stliu: update BN
+	if args.bn_update:
+		model.train()
+		for (images, _) in val_loader:
+			images = images.cuda(args.gpu, non_blocking=True)
+			# compute output
+			feats = model(images, 'r')
+		model.eval()
+
 	with torch.no_grad():
 		val_bar = tqdm(val_loader)
 		for (images, target) in val_bar:
@@ -336,7 +346,7 @@ def main_worker(gpu, ngpus_per_node, args):
 	if args.arch == 'resnet_ttt':
 		model = moco.builder.MoCo(
 			ResNetCifar,
-			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width, gn=args.group_norm)
+			args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, width=args.width, norm='bn')
 		# stliu: SVM with model_val on single GPU
 		if args.group_norm == 0:
 			norm_layer = nn.BatchNorm2d
@@ -344,7 +354,7 @@ def main_worker(gpu, ngpus_per_node, args):
 			def gn_helper(planes):
 				return nn.GroupNorm(args.group_norm, planes)
 			norm_layer = gn_helper
-		model_val = ResNetCifar(num_classes=args.moco_dim, width=args.width, norm_layer=norm_layer)
+		model_val = ResNetCifar(num_classes=args.moco_dim, width=args.width, norm_layer=nn.BatchNorm2d)
 	else:
 		model = moco.builder.MoCo(
 			models.__dict__[args.arch],

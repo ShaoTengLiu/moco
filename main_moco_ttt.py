@@ -265,7 +265,7 @@ def test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh):
 	model_lsvm = liblinearutil.train(label_bank.cpu().numpy(), feats_bank.cpu().numpy(), config_lsvm)
 
 	if args.bn_update:
-		# stliu: ttt
+		# stliu: update BN
 		model.train()
 		val_bar = tqdm(val_loader)
 		for (images, _) in val_bar:
@@ -273,6 +273,7 @@ def test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh):
 			# update BN
 			feats = model(images, 'r')
 			val_bar.set_description('Update BN')
+		model.eval()
 
 	with torch.no_grad():
 		val_bar = tqdm(val_loader)
