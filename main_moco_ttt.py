@@ -136,11 +136,17 @@ def parse_option(): # design a function for parse
 	parser.add_argument('--frozen', action='store_true') # freeze the norm(bn) when ttt
 	parser.add_argument('--bn_only', action='store_true') # only update bn at test time
 	parser.add_argument('--bn_update', action='store_true') # using whole val_loader to update BN
+	parser.add_argument('--oracle', default=None)
 
 
 	# stliu: one can do something with parsers here
 	opt = parser.parse_args()
-	opt.model_name = 'moco_ttt_{}_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_{}'.format(opt.norm, opt.width, opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.aug)
+	if opt.oracle:
+		opt.model_name = 'moco_ttt_{}_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_m_{}_{}{}'.format(opt.norm, opt.width, \
+			opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.moco_m, opt.aug, '_oracle_'+opt.oracle)
+	else:
+		opt.model_name = 'moco_ttt_{}_w{}_{}_lr_{}_bsz_{}_k_{}_t_{}_m_{}_{}'.format(opt.norm, opt.width, \
+			opt.arch, opt.lr, opt.batch_size, opt.moco_k, opt.moco_t, opt.moco_m, opt.aug)
 	opt.model_folder = os.path.join(opt.model_path, opt.model_name)
 	opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
 	if not os.path.isdir(opt.model_folder):
@@ -167,12 +173,20 @@ def get_loader(args):
 	else:
 		train_sampler = None
 
+	# stliu: oracle
+	if args.oracle:
+		corruption, level = args.oracle.split(',')
+		trainset_raw = np.load(args.data + '/CIFAR-10-C-trainval/train/%s.npy' %(corruption))[(int(level)-1)*50000: int(level)*50000]
+		train_dataset.data = trainset_raw
 	train_loader = torch.utils.data.DataLoader(
 		train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
 		num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
 	# stliu: add two other loader for SVM
 	memory_data = datasets.CIFAR10(root=args.data, train=True, download=True, transform=test_transform)
+	# stliu: oracle
+	if args.oracle:
+		memory_data.data = trainset_raw
 	memory_loader = torch.utils.data.DataLoader(memory_data, batch_size=args.batch_size, 
 								shuffle=False, num_workers=args.workers, pin_memory=True)
 	test_data = datasets.CIFAR10(root=args.data, train=False, download=True, transform=test_transform)
@@ -321,6 +335,7 @@ def ttt_test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh, 
 	# stliu: test time training
 	if args.frozen:
 		model_kq = FrozenBatchNorm2d.convert_frozen_batchnorm(model_kq)
+		model = FrozenBatchNorm2d.convert_frozen_batchnorm(model)
 	top1 = AverageMeter('Acc@1', ':4.2f')
 	criterion_ssh = nn.CrossEntropyLoss().cuda()
 	if args.bn_only:
@@ -367,7 +382,7 @@ def ttt_test(train_loader, model_kq, model, val_loader, config_lsvm, args, ssh, 
 		_, top1_acc, _ = liblinearutil.predict(targets, feats.cpu().detach().numpy(), model_lsvm, '-q')
 
 		# measure accuracy and record
-		top1.update(top1_acc[0], images.size(0))
+		top1.update(top1_acc[0])
 		ttt_bar.set_description('New Acc@SVM:{:.2f}%'.format(top1.avg))
 	return top1.avg
 
@@ -500,7 +515,7 @@ def main_worker(gpu, ngpus_per_node, args):
 		# stliu: tensorboard
 		logger = tb_logger.Logger(logdir=args.tb_folder, flush_secs=2)
 
-		for epoch in range(args.start_epoch, args.epochs):
+		for epoch in range(args.start_epoch, args.epochs+1): # stliu: to save the last one
 			if args.distributed:
 				train_sampler.set_epoch(epoch)
 			adjust_learning_rate(optimizer, epoch, args)
@@ -513,7 +528,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
 			if not args.multiprocessing_distributed or (args.multiprocessing_distributed
 					and args.rank % ngpus_per_node == 0):
-				if epoch % args.save_freq == 0 and epoch != 0: # stliu: ignore the first model
+				if (epoch % args.save_freq == 0 and epoch != 0) or epoch == args.epochs: # stliu: ignore the first model
 					print('==> Saving...')
 					save_checkpoint({
 						'epoch': epoch + 1,
@@ -544,7 +559,7 @@ def main_worker(gpu, ngpus_per_node, args):
 						'state_dict': model.state_dict(),
 						'head': head.state_dict(),
 						'optimizer' : optimizer.state_dict(),
-					}, is_best=True, filename=args.model_folder + '/best.pth.tar'.format(epoch))
+					}, is_best=True, filename=args.model_folder + '/best.pth.tar')
 		print('The Best SVM Accuracy:', best_acc1)
 
 def main():

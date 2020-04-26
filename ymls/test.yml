@@ -1,0 +1,26 @@
+cmd: python main_moco_ttt.py
+hparams:
+  a: resnet_ttt
+  print-freq: 30
+  save-freq: 80
+  svm-freq: 80
+  dist-url: 'tcp://localhost:10002'
+  multiprocessing-distributed
+  world-size: 1
+  rank: 0
+  model_path: ./results/model/
+  tb_path: ./results/tb/ \
+  --mlp --aug-plus --cos \
+  lr: 0.1
+  batch-size: 256
+  width: 4
+  epochs: 1000
+  moco-k: 4096
+  moco-t: 0.3
+  moco-m: 0.99
+  ../data/myCIFAR-10-C/ \
+  shared: layer2
+  rotation_type: rand
+  aug: original
+  norm: sn
+  oracle: brightness,5

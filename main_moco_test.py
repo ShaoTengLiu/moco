@@ -218,6 +218,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, ssh):
 
 		# compute output
 		output, target = model(im_q=images[0], im_k=images[1])
+		print(output.size())
 		loss = criterion(output, target)
 		if args.shared is not None:
 			inputs_ssh, labels_ssh = rotate_batch(images[0], args.rotation_type)

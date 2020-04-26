@@ -6,6 +6,7 @@ import shutil
 
 import torch.nn as nn
 from detectron2_utils.batch_norm import FrozenBatchNorm2d, NaiveSyncBatchNorm
+from switchable_norm import SwitchNorm2d
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 	torch.save(state, filename)
@@ -97,6 +98,8 @@ def get_norm(norm):
 		norm_layer = nn.SyncBatchNorm
 	elif norm == 'nsync':
 		norm_layer = NaiveSyncBatchNorm
+	elif norm == 'sn':
+		norm_layer = SwitchNorm2d
 	else:
 		group_norm = int(norm.split(',')[1])
 		def gn_helper(planes):
@@ -104,6 +107,6 @@ def get_norm(norm):
 		norm_layer = gn_helper
 	return norm_layer
 
-def set_bn_eval(m):
-    if isinstance(m, my_BatchNorm2d):
-        m.frozen()
+def set_gn_eval(m):
+    if isinstance(m, nn.GroupNorm):
+        m.eval()
